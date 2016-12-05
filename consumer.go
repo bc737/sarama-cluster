@@ -15,6 +15,7 @@ type Consumer struct {
 
 	csmr sarama.Consumer
 	subs *partitionMap
+	usubs map[topicPartition]int64
 
 	consumerID   string
 	generationID int32
@@ -43,9 +44,12 @@ func NewConsumerFromClient(client *Client, groupID string, topics []string) (*Co
 
 	sort.Strings(topics)
 	c := &Consumer{
-		client:  client,
-		csmr:    csmr,
-		subs:    newPartitionMap(),
+		client: client,
+
+		csmr: csmr,
+		subs: newPartitionMap(),
+		usubs: make(map[topicPartition]int64),
+
 		groupID: groupID,
 
 		targetTopics: topics,
@@ -174,6 +178,17 @@ func (c *Consumer) CommitOffsets() error {
 	return err
 }
 
+func (c *Consumer) Seek(topic string, partition int32, offset int64) {
+	pc := c.subs.Fetch(topic, partition)
+	if pc != nil {
+		//REVISIT whether to handle the case if the subscription already exists. For now, do nothing.
+//		pc.state.Info = offsetInfo{Offset: offset}
+//		pc.state.Dirty = true
+	} else {
+		c.usubs[topicPartition{topic, partition}] = offset
+	}
+}
+
 // Close safely closes the consumer and releases all resources
 func (c *Consumer) Close() (err error) {
 	select {
@@ -234,6 +249,12 @@ func (c *Consumer) mainLoop() {
 			continue
 		}
 
+		// Update notification with new claims
+		if c.client.config.Group.Return.Notifications {
+			notification.claim(subs)
+			c.notifications <- notification
+		}
+
 		// Start the heartbeat
 		hbStop, hbDone := make(chan none), make(chan none)
 		go c.hbLoop(hbStop, hbDone)
@@ -255,11 +276,6 @@ func (c *Consumer) mainLoop() {
 		go c.cmLoop(cmStop, cmDone)
 		atomic.StoreInt32(&c.consuming, 1)
 
-		// Update notification with new claims
-		if c.client.config.Group.Return.Notifications {
-			notification.claim(subs)
-			c.notifications <- notification
-		}
 
 		// Wait for signals
 		select {
@@ -493,6 +509,11 @@ func (c *Consumer) subscribe(subs map[string][]int32) error {
 			wg.Add(1)
 
 			info := offsets[topic][partition]
+			tp := topicPartition{topic, partition}
+			if seekedOffset, ok := c.usubs[tp]; ok {
+				info = offsetInfo{Offset: seekedOffset}
+				delete(c.usubs, tp)
+			}
 			go func(t string, p int32) {
 				if e := c.createConsumer(t, p, info); e != nil {
 					mu.Lock()

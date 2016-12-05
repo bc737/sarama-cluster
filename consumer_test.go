@@ -205,4 +205,38 @@ var _ = Describe("Consumer", func() {
 		Expect(cs.Close()).NotTo(HaveOccurred())
 	})
 
+	It("should seek for the optinal start offsets", func() {
+		config := NewConfig()
+		config.Consumer.Return.Errors = true
+		config.Group.Return.Notifications = true
+		cs, err := NewConsumer(testKafkaAddrs, testGroup, []string{"topic-a"}, config)
+
+		Expect(err).NotTo(HaveOccurred())
+		defer cs.Close()
+		// set arbitrary starting offset value including -2 or -1 (retrieved from somewhere)
+		var manualOffsets []int64 = []int64{1, 3, -2, -1}
+		go func() {
+			for note := range cs.Notifications() {
+				for topic, partitions := range note.Claimed {
+					for partition := range partitions {
+						if manualOffsets != nil {
+							cs.Seek(topic, int32(partition), manualOffsets[partition])
+						}
+					}
+					manualOffsets = nil
+				}
+			}
+		}()
+
+		subscriptionsOf(cs).Should(Equal(map[string][]int32{
+			"topic-a": {0, 1, 2, 3}},
+		))
+		snap := cs.subs.Snapshot()
+		Expect(snap).To(Equal(map[topicPartition]partitionState{
+			{Topic: "topic-a", Partition: 0}: {Info: offsetInfo{Offset: 1}},
+			{Topic: "topic-a", Partition: 1}: {Info: offsetInfo{Offset: 3}},
+			{Topic: "topic-a", Partition: 2}: {Info: offsetInfo{Offset: -2}},
+			{Topic: "topic-a", Partition: 3}: {Info: offsetInfo{Offset: -1}},
+		}))
+	})
 })
